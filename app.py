@@ -15,6 +15,20 @@ PRIORITIES = ["P0", "P1", "P2", "P3"]
 TASK_STATUSES = ["未开始", "进行中", "已完成", "延期", "取消"]
 CONTENT_STATUSES = ["想法", "制作中", "待发布", "已发布", "已复盘"]
 PLATFORMS = ["小红书", "Instagram", "小红书 + Instagram", "其他"]
+MOODS = ["😄", "🙂", "😐", "😮‍💨", "😴"]
+RATINGS = ["完美", "优秀", "还行", "一般", "交差"]
+DAILY_QUOTES = [
+    "先完成，再完美。",
+    "把注意力放回今天可以推进的一小步。",
+    "稳定地出现，本身就是一种能力。",
+    "灵感需要被记录，计划需要被保护。",
+    "不必做很多，只做真正重要的事。",
+    "休息不是中断，休息是长期创作的一部分。",
+    "让作品说话，让复盘帮助下一次更好。",
+    "慢一点没有关系，不要停止。",
+    "今天留下的痕迹，会成为未来的作品。",
+    "清晰比忙碌更重要。",
+]
 
 st.markdown("""
 <style>
@@ -22,6 +36,13 @@ st.markdown("""
   [data-testid="stMetric"] {background: #f7f5fb; border: 1px solid #ebe7f2; padding: 14px; border-radius: 12px;}
   .protected {background:#f4efff; border-left:4px solid #7657c7; padding:12px 14px; border-radius:8px; margin:6px 0;}
   .hint {color:#6f6879; font-size:.92rem;}
+  .activity-wrap {overflow-x:auto; padding:4px 0 10px;}
+  .activity-row {display:flex; align-items:center; gap:5px; margin:7px 0; min-width:650px;}
+  .activity-month {width:42px; color:#6f6879; font-size:.85rem; flex:none;}
+  .activity-cell {width:14px; height:14px; border-radius:4px; background:#edf0f5; flex:none;}
+  .activity-cell.on {background:#3295f2;}
+  .activity-cell.today {outline:2px solid #7657c7; outline-offset:1px;}
+  .quote-card {background:#f7f5fb; border:1px solid #ebe7f2; padding:14px; border-radius:12px; color:#4f4859; line-height:1.65;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -50,11 +71,66 @@ def delete_button(table: str, row_id: int, key: str):
         rerun("已删除")
 
 
+def activity_days(year: int) -> set[str]:
+    rows = query("""
+        SELECT substr(created_at,1,10) day FROM tasks WHERE substr(created_at,1,4)=?
+        UNION SELECT substr(completed_at,1,10) FROM tasks WHERE completed_at IS NOT NULL AND substr(completed_at,1,4)=?
+        UNION SELECT block_date FROM time_blocks WHERE substr(block_date,1,4)=? AND (actual_hours>0 OR actual_result!='')
+        UNION SELECT substr(created_at,1,10) FROM contents WHERE substr(created_at,1,4)=?
+        UNION SELECT substr(created_at,1,10) FROM ideas WHERE substr(created_at,1,4)=?
+        UNION SELECT checkin_date FROM daily_checkins WHERE substr(checkin_date,1,4)=?
+    """, (str(year),) * 6)
+    return {row["day"] for row in rows if row["day"]}
+
+
+def render_activity_board(today: date):
+    with st.expander("📅 系统看板", expanded=False):
+        year = st.selectbox("年份", list(range(today.year, today.year - 5, -1)), key="activity_year")
+        active = activity_days(year)
+        html = ['<div class="activity-wrap">']
+        for month in range(1, 13):
+            if month == 12:
+                days_in_month = 31
+            else:
+                days_in_month = (date(year, month + 1, 1) - timedelta(days=1)).day
+            cells = []
+            for day in range(1, days_in_month + 1):
+                day_text = date(year, month, day).isoformat()
+                classes = ["activity-cell"]
+                if day_text in active:
+                    classes.append("on")
+                if day_text == today.isoformat():
+                    classes.append("today")
+                cells.append(f'<span class="{" ".join(classes)}" title="{day_text}"></span>')
+            html.append(f'<div class="activity-row"><span class="activity-month">{month}月</span>{"".join(cells)}</div>')
+        html.append("</div>")
+        st.markdown("".join(html), unsafe_allow_html=True)
+        st.caption(f"{year} 年已留下 {len(active)} 天记录 · 蓝色代表当天有新增、完成或复盘")
+
+
+def daily_checkin(today: date):
+    existing = query("SELECT * FROM daily_checkins WHERE checkin_date=?", (today.isoformat(),))
+    row = existing[0] if existing else {}
+    st.subheader("今日状态")
+    with st.form("daily_checkin"):
+        c1, c2 = st.columns([1, 2])
+        mood = c1.radio("今天感觉", MOODS, horizontal=True, index=MOODS.index(row.get("mood", "🙂")))
+        rating = c2.radio("今日自我评价", RATINGS, horizontal=True, index=RATINGS.index(row.get("rating", "还行")))
+        note = st.text_input("给今天留一句话", row.get("note", ""), placeholder="今天最值得记住的是什么？")
+        if st.form_submit_button("记录今日状态", type="primary"):
+            execute("""INSERT INTO daily_checkins (checkin_date,mood,rating,note,updated_at) VALUES (?,?,?,?,?)
+                ON CONFLICT(checkin_date) DO UPDATE SET mood=excluded.mood,rating=excluded.rating,note=excluded.note,updated_at=excluded.updated_at""",
+                (today.isoformat(), mood, rating, note, datetime.now().isoformat(timespec="seconds")))
+            rerun("今日状态已记录")
+
+
 def dashboard():
     today = date.today()
     ensure_default_time_blocks(today)
     st.title("🌙 Moon Studio OS")
     st.caption(f"{today.strftime('%Y年%m月%d日')} · 今天只关注真正重要的事")
+    render_activity_board(today)
+    daily_checkin(today)
 
     today_tasks = query("""
         SELECT t.*, p.name project_name FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
@@ -143,12 +219,17 @@ def task_page():
             actual = e2.number_input("实际耗时（小时）", 0.0, step=0.5)
             progress = e3.slider("完成比例", 0, 100, 100 if status == "已完成" else 0)
             notes = st.text_area("备注")
+            new_project_name = st.text_input("没有合适分类？可直接创建新项目", placeholder="选填：输入新项目名称")
             if st.form_submit_button("保存任务", type="primary"):
                 if not name.strip(): st.error("请填写任务名称")
                 else:
+                    project_id = name_to_id.get(project)
+                    if new_project_name.strip():
+                        execute("INSERT OR IGNORE INTO projects (name,priority,created_at) VALUES (?,?,?)", (new_project_name.strip(), "P2", datetime.now().isoformat(timespec="seconds")))
+                        project_id = query("SELECT id FROM projects WHERE name=?", (new_project_name.strip(),))[0]["id"]
                     completed = datetime.now().isoformat(timespec="seconds") if status == "已完成" else None
                     execute("""INSERT INTO tasks (name,project_id,type,priority,status,deadline,estimated_hours,actual_hours,progress,notes,completed_at,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (name.strip(), name_to_id.get(project), task_type, priority, status, optional_date(deadline), estimated, actual, 100 if status == "已完成" else progress, notes, completed, datetime.now().isoformat(timespec="seconds")))
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (name.strip(), project_id, task_type, priority, status, optional_date(deadline), estimated, actual, 100 if status == "已完成" else progress, notes, completed, datetime.now().isoformat(timespec="seconds")))
                     rerun("任务已创建")
 
     f1, f2, f3 = st.columns(3)
@@ -164,6 +245,10 @@ def task_page():
     if not rows: st.info("没有符合条件的任务。")
     for t in rows:
         label = f"{t['priority']} · {t['name']}　｜　{t['status']}　｜　{t['project_name'] or '未归类'}"
+        if t["status"] not in ("已完成", "取消"):
+            if st.checkbox(f"✓ 今日完成 · {t['name']}", key=f"quick_done_{t['id']}"):
+                execute("UPDATE tasks SET status='已完成',progress=100,completed_at=? WHERE id=?", (datetime.now().isoformat(timespec="seconds"), t["id"]))
+                rerun("任务已完成")
         with st.expander(label):
             with st.form(f"edit_task_{t['id']}"):
                 name = st.text_input("任务名称", t["name"])
@@ -192,6 +277,25 @@ def task_page():
 
 def project_page():
     st.title("项目管理")
+    with st.expander("＋ 新建项目", expanded=False):
+        with st.form("new_project", clear_on_submit=True):
+            name = st.text_input("项目名称 *")
+            goal = st.text_area("目标")
+            a, b, c = st.columns(3)
+            stage = a.text_input("当前阶段", placeholder="例如：探索 / 制作 / 冲刺")
+            priority = b.selectbox("优先级", PRIORITIES, index=2)
+            has_deadline = c.checkbox("设置截止日期")
+            deadline = st.date_input("截止日期", value=date.today()) if has_deadline else None
+            next_action = st.text_input("下一步行动")
+            if st.form_submit_button("创建项目", type="primary"):
+                if not name.strip():
+                    st.error("请填写项目名称")
+                elif query("SELECT id FROM projects WHERE name=?", (name.strip(),)):
+                    st.error("项目名称已存在")
+                else:
+                    execute("""INSERT INTO projects (name,goal,stage,priority,deadline,next_action,created_at)
+                        VALUES (?,?,?,?,?,?,?)""", (name.strip(), goal, stage, priority, optional_date(deadline), next_action, datetime.now().isoformat(timespec="seconds")))
+                    rerun("项目已创建")
     for p in project_progress():
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
@@ -385,7 +489,10 @@ with st.sidebar:
     st.caption("一个人的长期工作台")
     page = st.radio("导航", list(PAGES), label_visibility="collapsed")
     st.divider()
+    quote = DAILY_QUOTES[date.today().toordinal() % len(DAILY_QUOTES)]
+    st.markdown(f'<div class="quote-card"><b>每日一语</b><br>{quote}</div>', unsafe_allow_html=True)
+    st.caption("每天自动更新 · 无需联网")
+    st.divider()
     st.caption("先完成今天最重要的事。")
 
 PAGES[page]()
-

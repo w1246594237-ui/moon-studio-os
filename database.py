@@ -69,6 +69,14 @@ def init_db() -> None:
         continue_tests TEXT DEFAULT '', next_three TEXT DEFAULT '', stop_doing TEXT DEFAULT '',
         updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS daily_checkins (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        checkin_date TEXT NOT NULL UNIQUE,
+        mood TEXT NOT NULL DEFAULT '🙂',
+        rating TEXT NOT NULL DEFAULT '还行',
+        note TEXT DEFAULT '',
+        updated_at TEXT NOT NULL
+    );
     """
     defaults = [
         ("作品集冲刺", "完成作品集并准备求职", "冲刺阶段", "P0", "2026-07-22", "完成今天的作品集深度工作"),
@@ -112,4 +120,3 @@ def ensure_default_time_blocks(day: date) -> None:
             "INSERT INTO time_blocks (block_date, period, plan, actual_result, actual_hours, project_id, is_protected) VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
-
