@@ -10,6 +10,16 @@ from database import ensure_default_time_blocks, execute, init_db, query
 
 st.set_page_config(page_title="Moon Studio OS", page_icon="🌙", layout="wide")
 init_db()
+# Streamlit Cloud may hot-reload app.py while retaining an older imported
+# database module. Keep this migration here as a second, idempotent guard.
+execute("""CREATE TABLE IF NOT EXISTS daily_checkins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    checkin_date TEXT NOT NULL UNIQUE,
+    mood TEXT NOT NULL DEFAULT '🙂',
+    rating TEXT NOT NULL DEFAULT '还行',
+    note TEXT DEFAULT '',
+    updated_at TEXT NOT NULL
+)""")
 
 PRIORITIES = ["P0", "P1", "P2", "P3"]
 TASK_STATUSES = ["未开始", "进行中", "已完成", "延期", "取消"]
