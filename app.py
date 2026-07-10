@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -20,6 +21,8 @@ execute("""CREATE TABLE IF NOT EXISTS daily_checkins (
     note TEXT DEFAULT '',
     updated_at TEXT NOT NULL
 )""")
+if "health" not in {row["name"] for row in query("PRAGMA table_info(projects)")}:
+    execute("ALTER TABLE projects ADD COLUMN health TEXT NOT NULL DEFAULT '顺利'")
 
 PRIORITIES = ["P0", "P1", "P2", "P3"]
 TASK_STATUSES = ["未开始", "进行中", "已完成", "延期", "取消"]
@@ -27,6 +30,8 @@ CONTENT_STATUSES = ["想法", "制作中", "待发布", "已发布", "已复盘"
 PLATFORMS = ["小红书", "Instagram", "小红书 + Instagram", "其他"]
 MOODS = ["😄", "🙂", "😐", "😮‍💨", "😴"]
 RATINGS = ["完美", "优秀", "还行", "一般", "交差"]
+PROJECT_HEALTH = ["顺利", "需关注", "有风险", "暂停"]
+PROJECT_STAGES = ["构思", "规划", "进行中", "冲刺", "等待", "收尾", "已完成"]
 DAILY_QUOTES = [
     "先完成，再完美。",
     "把注意力放回今天可以推进的一小步。",
@@ -148,6 +153,9 @@ def dashboard():
         ORDER BY CASE t.priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 ELSE 3 END, t.deadline LIMIT 3
     """, (today.isoformat(),))
     all_today = query("SELECT status FROM tasks WHERE deadline = ? AND status != '取消'", (today.isoformat(),))
+    focus_tasks = query("""SELECT estimated_hours FROM tasks
+        WHERE status NOT IN ('已完成','取消') AND (deadline=? OR status='进行中')""", (today.isoformat(),))
+    planned_hours = sum(float(t["estimated_hours"] or 0) for t in focus_tasks)
     done = sum(t["status"] == "已完成" for t in all_today)
     rate = round(done / len(all_today) * 100) if all_today else 0
     deadline = date(2026, 7, 22)
@@ -162,6 +170,12 @@ def dashboard():
         LEFT JOIN projects p ON p.id=tb.project_id WHERE tb.block_date BETWEEN ? AND ? AND p.name='作品集冲刺'""",
         (week_start.isoformat(), today.isoformat()))[0]["hours"]
     c4.metric("本周作品集投入", f"{hours:g} 小时")
+
+    if focus_tasks:
+        if planned_hours > 6.5:
+            st.warning(f"今日计划负荷约 {planned_hours:g} 小时，可能偏满。建议只保留最重要的 3 件事。")
+        else:
+            st.info(f"今日专注：{len(focus_tasks)} 项待推进 · 预计 {planned_hours:g} 小时 · 下午深度工作时间已保护")
 
     left, right = st.columns([1.15, 1])
     with left:
@@ -194,7 +208,8 @@ def dashboard():
 
         st.subheader("项目整体进度")
         for p in project_progress():
-            st.write(f"**{p['name']}** · {p['priority']} · {p['progress']}%")
+            health_icon = {"顺利": "🟢", "需关注": "🟡", "有风险": "🔴", "暂停": "⚪"}.get(p.get("health"), "🟢")
+            st.write(f"**{p['name']}** · {p['priority']} · {health_icon} {p.get('health') or '顺利'} · {p['progress']}%")
             st.progress(p["progress"] / 100)
             st.caption(p["next_action"] or "尚未设置下一步")
 
@@ -287,14 +302,16 @@ def task_page():
 
 def project_page():
     st.title("项目管理")
+    st.caption("像 Linear 一样看清阶段和风险，但只保留真正需要维护的信息。")
     with st.expander("＋ 新建项目", expanded=False):
         with st.form("new_project", clear_on_submit=True):
             name = st.text_input("项目名称 *")
             goal = st.text_area("目标")
             a, b, c = st.columns(3)
-            stage = a.text_input("当前阶段", placeholder="例如：探索 / 制作 / 冲刺")
+            stage = a.selectbox("当前阶段", PROJECT_STAGES, index=1)
             priority = b.selectbox("优先级", PRIORITIES, index=2)
             has_deadline = c.checkbox("设置截止日期")
+            health = st.selectbox("项目健康度", PROJECT_HEALTH)
             deadline = st.date_input("截止日期", value=date.today()) if has_deadline else None
             next_action = st.text_input("下一步行动")
             if st.form_submit_button("创建项目", type="primary"):
@@ -303,13 +320,14 @@ def project_page():
                 elif query("SELECT id FROM projects WHERE name=?", (name.strip(),)):
                     st.error("项目名称已存在")
                 else:
-                    execute("""INSERT INTO projects (name,goal,stage,priority,deadline,next_action,created_at)
-                        VALUES (?,?,?,?,?,?,?)""", (name.strip(), goal, stage, priority, optional_date(deadline), next_action, datetime.now().isoformat(timespec="seconds")))
+                    execute("""INSERT INTO projects (name,goal,stage,priority,deadline,next_action,created_at,health)
+                        VALUES (?,?,?,?,?,?,?,?)""", (name.strip(), goal, stage, priority, optional_date(deadline), next_action, datetime.now().isoformat(timespec="seconds"), health))
                     rerun("项目已创建")
     for p in project_progress():
         with st.container(border=True):
             c1, c2 = st.columns([4, 1])
-            c1.subheader(f"{p['name']} · {p['priority']}")
+            health_icon = {"顺利": "🟢", "需关注": "🟡", "有风险": "🔴", "暂停": "⚪"}.get(p.get("health"), "🟢")
+            c1.subheader(f"{p['name']} · {p['priority']} · {health_icon} {p.get('health') or '顺利'}")
             c2.metric("完成", f"{p['progress']}%")
             st.progress(p["progress"] / 100)
             a, b, c = st.columns(3)
@@ -317,17 +335,21 @@ def project_page():
             b.write(f"**截止日期**  \n{p['deadline'] or '长期项目'}")
             c.write(f"**任务 / 投入**  \n{p['task_count']} 项 / {p['invested_hours']:g} 小时")
             st.write(f"**目标：** {p['goal'] or '—'}")
-            st.info(f"下一步行动：{p['next_action'] or '尚未设置'}")
+            st.info(f"➡️ 下一步行动：{p['next_action'] or '尚未设置'}")
             with st.expander("编辑项目"):
                 with st.form(f"project_{p['id']}"):
                     goal = st.text_area("目标", p["goal"] or "")
                     x, y, z = st.columns(3)
-                    stage = x.text_input("当前阶段", p["stage"] or "")
+                    stage_options = PROJECT_STAGES.copy()
+                    if p["stage"] and p["stage"] not in stage_options:
+                        stage_options.insert(0, p["stage"])
+                    stage = x.selectbox("当前阶段", stage_options, index=0 if p["stage"] not in PROJECT_STAGES else PROJECT_STAGES.index(p["stage"]))
                     priority = y.selectbox("优先级", PRIORITIES, index=PRIORITIES.index(p["priority"]))
                     deadline = z.date_input("截止日期", value=date.fromisoformat(p["deadline"]) if p["deadline"] else None)
+                    health = st.select_slider("项目健康度", PROJECT_HEALTH, value=p.get("health") or "顺利")
                     next_action = st.text_input("下一步行动", p["next_action"] or "")
                     if st.form_submit_button("保存"):
-                        execute("UPDATE projects SET goal=?,stage=?,priority=?,deadline=?,next_action=? WHERE id=?", (goal, stage, priority, optional_date(deadline), next_action, p["id"]))
+                        execute("UPDATE projects SET goal=?,stage=?,priority=?,deadline=?,next_action=?,health=? WHERE id=?", (goal, stage, priority, optional_date(deadline), next_action, health, p["id"]))
                         rerun("项目已更新")
 
 
@@ -499,9 +521,15 @@ with st.sidebar:
     st.caption("一个人的长期工作台")
     page = st.radio("导航", list(PAGES), label_visibility="collapsed")
     st.divider()
-    quote = DAILY_QUOTES[date.today().toordinal() % len(DAILY_QUOTES)]
+    if "quote_index" not in st.session_state:
+        st.session_state.quote_index = date.today().toordinal() % len(DAILY_QUOTES)
+    quote = DAILY_QUOTES[st.session_state.quote_index]
     st.markdown(f'<div class="quote-card"><b>每日一语</b><br>{quote}</div>', unsafe_allow_html=True)
-    st.caption("每天自动更新 · 无需联网")
+    if st.button("🎲 换一句", use_container_width=True):
+        choices = [i for i in range(len(DAILY_QUOTES)) if i != st.session_state.quote_index]
+        st.session_state.quote_index = random.choice(choices)
+        st.rerun()
+    st.caption("每日默认更新 · 也可以随机切换")
     st.divider()
     st.caption("先完成今天最重要的事。")
 
